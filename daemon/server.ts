@@ -120,7 +120,9 @@ async function ensureWorkspace(request: LaunchRequest): Promise<string> {
   else await mkdir(dir, { recursive: true })
   if (request.prepare.trim()) {
     await new Promise<void>((resolve, reject) => {
-      execFile(request.prepare.trim(), { cwd: config.workRoot, shell: true, windowsHide: true, timeout: 600_000 }, error => {
+      // The prepare command reads the same DSH_SUPERAGENT_* variables the local executor's prepare reads.
+      execFile(request.prepare.trim(), { cwd: config.workRoot, shell: true, windowsHide: true, timeout: 600_000,
+        env: { ...process.env, DSH_SUPERAGENT_DIR: dir, DSH_SUPERAGENT_NAME: request.worktree, DSH_SUPERAGENT_TICKET: request.ticketId } }, error => {
         if (error) reject(new Error(`prepare failed: ${String(error)}`))
         else resolve()
       })
