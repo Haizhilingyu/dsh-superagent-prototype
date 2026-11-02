@@ -94,6 +94,21 @@ export const ExecutorConfigSchema = z.object({
   directory: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for <stateDir>/work').default(''),
   prepare: z.string().max(LIMITS.prepareCommand).default(''),
   blockedCommands: z.array(CommandNameSchema).default([]),
+  /** `dsh` runs workers as local Harness Sessions; `remote` sends Assignments to a worker daemon on another host. */
+  mode: z.enum(['dsh', 'remote']).default('dsh'),
+  /** Remote worker daemon settings; used only when `mode` is `remote`. */
+  remote: z.object({
+    /** The daemon's base URL, for example `http://10.147.17.177:8790`. Empty falls back to the local executor. */
+    url: z.string().trim().default(''),
+    /** This host's callback listener as `host:port` (or a bare port); empty disables daemon callbacks. */
+    listen: z.string().trim().default(''),
+    /** Shared bearer token for both directions; empty sends and accepts no auth header. */
+    token: z.string().default(''),
+    /** Command the daemon runs in the workspace parent before the worker starts, as `prepare` does locally. */
+    prepare: z.string().max(LIMITS.prepareCommand).default(''),
+    /** Extra system-prompt text the daemon appends to the worker runtime's default prompt. */
+    workerPrompt: z.string().max(LIMITS.prepareCommand).default(''),
+  }).strict().default({ url: '', listen: '', token: '', prepare: '', workerPrompt: '' }),
 }).strict()
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
 export const SettingsSchema = z.object({

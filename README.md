@@ -34,6 +34,12 @@ Read the numbered documents in order; each builds only on the ones before it.
 
 `pnpm check` runs the typecheck, the tests and the build.
 
+## Remote workers
+
+With `executor.mode: remote` in the settings, Assignments are dispatched over HTTP to a worker daemon on another host
+(for example a personal machine across a ZeroTier network) that runs the pi coding agent. The daemon, its settings and
+the smoke test are documented in [daemon/README.md](daemon/README.md).
+
 ## License
 
 [MIT](LICENSE)

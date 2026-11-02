@@ -24,6 +24,7 @@
     "src/**/*.tsx",
     "tests/**/*.ts",
     "tests/**/*.tsx",
+    "daemon/**/*.ts",
     "tsdown.config.ts"
   ]
 }
