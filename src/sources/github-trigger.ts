@@ -4,9 +4,22 @@ import { key, type ChannelRef, type Trigger } from '../core/index.ts'
 import { escapeRegExp, sameName } from '../infra/text.ts'
 
 export const SOURCE = 'github'
+/** Kind id of the multi-repository GitHub source; its Thread ids qualify the Issue number with `owner/name#`. */
+export const MULTI = 'github-multi'
+/**
+ * Marks triggers of a repo-qualified kind: `source` names the kind (such as `github-multi`) and `repository` the owning
+ * `owner/name`. Omitted for the legacy single-repository kind, whose triggers keep number-only Thread ids.
+ */
+export interface GithubScope { source: string; repository: string }
+const scopeOf = (scope: GithubScope | undefined, number: number): { source: string; id: string } | undefined =>
+  scope ? { source: scope.source, id: `${scope.repository}#${number}` } : undefined
 /** GitHub reply address: issue/PR conversation, or a review thread when `url` points at a discussion comment. */
-export const githubChannel = (number: number, url?: string): ChannelRef =>
-  ({ source: SOURCE, thread: `github:${number}`, address: { number: String(number), ...(url ? { url } : {}) } })
+export const githubChannel = (number: number, url?: string, scope?: GithubScope): ChannelRef => {
+  const named = scopeOf(scope, number)
+  return named
+    ? { source: named.source, thread: `${named.source}:${named.id}`, address: { number: String(number), repository: scope!.repository, ...(url ? { url } : {}) } }
+    : { source: SOURCE, thread: `github:${number}`, address: { number: String(number), ...(url ? { url } : {}) } }
+}
 export const githubPage = (repository: string, number: number, pr = false): string =>
   `https://github.com/${repository}/${pr ? 'pull' : 'issues'}/${number}`
 /** Parses a web or API URL for an Issue, PR, or review comment in `repository`; returns undefined for other URLs or repositories. */
@@ -59,17 +72,20 @@ function commentText(comment: GithubComment, kind: 'conversation' | 'inline' | '
 }
 export const mentions = (text: string, login: string): boolean =>
   new RegExp(`(?:^|[^a-zA-Z0-9_@])@${escapeRegExp(login)}(?![a-zA-Z0-9_-])`, 'i').test(text)
-const author = (user: { login: string; type?: string }, agent: string) =>
-  ({ actor: { source: SOURCE, id: user.login }, human: isHumanLogin(user) && !sameName(user.login, agent) })
+const author = (user: { login: string; type?: string }, agent: string, scope?: GithubScope) =>
+  ({ actor: { source: scope?.source ?? SOURCE, id: user.login }, human: isHumanLogin(user) && !sameName(user.login, agent) })
 /** Builds a trigger for a comment or review; text is empty for a bodyless comment or a `COMMENTED` review without a body. */
-export function commentTrigger(comment: GithubComment, ref: PullRef, kind: 'conversation' | 'inline' | 'review', agent: string): Trigger {
+export function commentTrigger(comment: GithubComment, ref: PullRef, kind: 'conversation' | 'inline' | 'review', agent: string,
+  scope?: GithubScope): Trigger {
   const at = comment.updated_at ?? comment.submitted_at ?? comment.created_at ?? new Date().toISOString()
   const version = comment.updated_at ?? comment.submitted_at ?? ''
   const id = key('github-comment', comment.html_url ?? `github:${ref.number}`, String(comment.id), version)
-  return { id, source: SOURCE, threads: [{ source: SOURCE, id: String(ref.number) }], ...author(comment.user, agent), at,
+  const thread = scopeOf(scope, ref.number)
+  return { id, source: scope?.source ?? SOURCE, threads: [{ source: thread?.source ?? SOURCE, id: thread?.id ?? String(ref.number) }],
+    ...author(comment.user, agent, scope), at,
     text: commentText(comment, kind),
     ...(mentions(comment.body ?? '', agent) ? { addressed: 'mention' as const } : {}),
-    channel: githubChannel(ref.number, comment.html_url ?? undefined),
+    channel: githubChannel(ref.number, comment.html_url ?? undefined, scope),
     ...(comment.html_url ?? ref.url ? { url: comment.html_url ?? ref.url } : {}),
     meta: { number: ref.number, isPr: ref.isPr, ...(ref.prAuthor ? { prAuthor: ref.prAuthor } : {}), commentId: comment.id, kind,
       ...comment.path ? { path: comment.path, line: comment.line ?? comment.original_line ?? null } : {},
@@ -79,30 +95,35 @@ export function commentTrigger(comment: GithubComment, ref: PullRef, kind: 'conv
  * Builds the trigger for a newly opened Issue's title and body.
  * The ID is the same as when Issue bodies were stored previously, so already-stored bodies are not ingested again.
  */
-export function issueTrigger(issue: Opened, agent: string): Trigger {
+export function issueTrigger(issue: Opened, agent: string, scope?: GithubScope): Trigger {
   const body = issue.body ?? ''
-  return { id: key('github-issue', String(issue.number)), source: SOURCE,
-    threads: [{ source: SOURCE, id: String(issue.number) }], ...author(issue.user, agent), at: issue.created_at,
+  const thread = scopeOf(scope, issue.number)
+  return { id: key('github-issue', String(issue.number)), source: scope?.source ?? SOURCE,
+    threads: [{ source: thread?.source ?? SOURCE, id: thread?.id ?? String(issue.number) }], ...author(issue.user, agent, scope), at: issue.created_at,
     text: `${issue.title}\n\n${body}`,
     ...(mentions(body, agent) ? { addressed: 'mention' as const } : {}),
-    channel: githubChannel(issue.number, issue.html_url), url: issue.html_url, meta: { number: issue.number, isPr: false, kind: 'issue' } }
+    channel: githubChannel(issue.number, issue.html_url, scope), url: issue.html_url, meta: { number: issue.number, isPr: false, kind: 'issue' } }
 }
 /**
  * Builds the trigger for a newly opened PR's title and description.
  * PR and Issue numbers share one sequence in GitHub and never collide, so this reuses `issueTrigger`'s `github-issue` ID format.
  */
-export function pullTrigger(pull: Opened, agent: string): Trigger {
-  return { ...issueTrigger(pull, agent), meta: { number: pull.number, isPr: true, prAuthor: pull.user.login, kind: 'pull' } }
+export function pullTrigger(pull: Opened, agent: string, scope?: GithubScope): Trigger {
+  return { ...issueTrigger(pull, agent, scope), meta: { number: pull.number, isPr: true, prAuthor: pull.user.login, kind: 'pull' } }
 }
 /** Builds a trigger for a default-branch CI transition; default-branch CI has no person to reply to, so it has no `channel`. */
-export function branchCiTrigger(branch: string, sha: string, revision: number, summary: string, url: string): Trigger {
-  return { id: key('github-ci', `branch:${branch}`, String(revision)), source: SOURCE,
-    threads: [{ source: SOURCE, id: `ci:${branch}` }], actor: { source: SOURCE, id: '' }, human: false, at: new Date().toISOString(),
-    text: summary, url, meta: { ci: true, branch, sha, revision } }
+export function branchCiTrigger(branch: string, sha: string, revision: number, summary: string, url: string, scope?: GithubScope): Trigger {
+  const thread = scope ? { source: scope.source, id: `${scope.repository}:ci:${branch}` } : { source: SOURCE, id: `ci:${branch}` }
+  return { id: key('github-ci', scope ? thread.id : `branch:${branch}`, String(revision)), source: thread.source,
+    threads: [thread], actor: { source: thread.source, id: '' }, human: false, at: new Date().toISOString(),
+    text: summary, url, meta: { ci: true, branch, sha, revision, ...scope ? { repository: scope.repository } : {} } }
 }
-export function ciTrigger(pr: { number: number; html_url: string; user: { login: string } }, revision: number, summary: string): Trigger {
-  return { id: key('github-ci', String(pr.number), String(revision)), source: SOURCE, threads: [{ source: SOURCE, id: String(pr.number) }],
-    actor: { source: SOURCE, id: '' }, human: false, at: new Date().toISOString(),
-    text: summary, channel: githubChannel(pr.number), url: pr.html_url,
+export function ciTrigger(pr: { number: number; html_url: string; user: { login: string } }, revision: number, summary: string,
+  scope?: GithubScope): Trigger {
+  const thread = scopeOf(scope, pr.number)
+  return { id: key('github-ci', String(pr.number), String(revision)), source: scope?.source ?? SOURCE,
+    threads: [{ source: thread?.source ?? SOURCE, id: thread?.id ?? String(pr.number) }],
+    actor: { source: scope?.source ?? SOURCE, id: '' }, human: false, at: new Date().toISOString(),
+    text: summary, channel: githubChannel(pr.number, undefined, scope), url: pr.html_url,
     meta: { number: pr.number, isPr: true, prAuthor: pr.user.login, ci: true, revision } }
 }

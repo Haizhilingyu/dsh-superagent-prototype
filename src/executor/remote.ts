@@ -139,9 +139,10 @@ export class RemoteExecutor implements Executor {
     const sourceKind = trigger?.source ?? ''
     const profileBySource = settings.executor.remote.profileBySource ?? {}
     const profileName = profileBySource[sourceKind] || settings.executor.remote.defaultProfile || 'coder'
+    const triggerRepo = (trigger?.channel?.address as Record<string, string | undefined> | undefined)?.repository ?? ''
     const repository = sourceKind === 'github'
       ? GithubRepoShape.safeParse(settings.sources['github']?.config).data?.repository ?? ''
-      : ''
+      : triggerRepo
     const link = trigger ? await this.host.sourceLink(trigger) : {}
     const payload: LaunchRequest = {
       protocol: 1,

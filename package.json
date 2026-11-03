@@ -16,6 +16,7 @@
     "./client": "./lib/client.js",
     "./github-watch": "./lib/github-watch.js",
     "./feishu-watch": "./lib/feishu-watch.js",
+    "./multi-watch": "./lib/multi-watch.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
   },

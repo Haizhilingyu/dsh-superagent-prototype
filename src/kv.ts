@@ -49,6 +49,15 @@ export const KV = {
     branchCi: record<{ branch?: string; failures?: string[]; revision: number }>('github-branch-ci'),
     ci: family<{ fingerprint: string; revision: number }, [number: number]>('github-ci:') },
   /**
+   * Multi-repository GitHub Source: account-wide notification cursor and pending retries keyed `owner/name#number`;
+   * per-repository read cursors, stream cursors, default-branch CI state, and per-PR CI fingerprints (`ref` is `owner/name#number`).
+   */
+  githubMulti: { since: record<string>('github-multi-since'), retries: record<Record<string, Retry>>('github-multi-retry'),
+    cursor: family<string, [ref: string]>('github-multi-cursor:'),
+    stream: family<{ since: string; started: Record<string, string>; etag?: string }, [repo: string, stream: string]>('github-multi-stream:', (repo, stream) => `${repo}/${stream}`),
+    branchCi: family<{ branch?: string; failures?: string[]; revision: number }, [repo: string]>('github-multi-branch-ci:'),
+    ci: family<{ fingerprint: string; revision: number }, [ref: string]>('github-multi-ci:') },
+  /**
    * Feishu Source: known chats (`true` for direct messages); per-chat history cursor and active topics mapped from topic ID
    * to last-seen timestamp; and per-polled-thread seen message IDs and initialization flag.
    */

@@ -6,6 +6,9 @@
       name: dsh-superagent
     - id: dsh-superagent-github
       name: dsh-superagent/github-watch
+    # Optional multi-repository GitHub Source; enable it and fill the repository list in the panel's Sources settings.
+    - id: dsh-superagent-multi
+      name: dsh-superagent/multi-watch
     # Optional Feishu Source; requires configuring a bot CLI after enabling.
     - id: dsh-superagent-feishu
       name: dsh-superagent/feishu-watch
