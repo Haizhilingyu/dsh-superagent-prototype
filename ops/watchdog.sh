@@ -37,7 +37,7 @@ done
 
 # 2. worker daemons (ZeroTier)
 for port in $DAEMONS; do
-  h=$(curl -s -m 8 -H "Authorization: Bearer $(cat "$DAEMON_TOKEN_FILE" 2>/dev/null)" "http://10.147.17.177:$port/v1/health" 2>/dev/null)
+  h=$(curl -s -m 15 -H "Authorization: Bearer $(cat "$DAEMON_TOKEN_FILE" 2>/dev/null)" "http://10.147.17.177:$port/v1/health" 2>/dev/null)
   case "$h" in *'"ok":true'*) resolve "daemon-down-$port" ;; *) alert "daemon-down-$port" "worker daemon(.177:$port) 无响应：${h:-no-reply}" ;; esac
 done
 

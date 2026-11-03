@@ -20,7 +20,7 @@ const NotificationSchema = z.looseObject({
 const RETRY_WINDOW_MS = 24 * 3600_000
 
 const MultiConfigSchema = GithubAccountsSchema.extend({
-  repositories: z.array(z.string().trim().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, 'owner/name')).min(1).max(20),
+  repositories: z.array(z.string().trim().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, 'owner/name')).max(20).default([]),
   pollSeconds: z.number().int().min(60).max(3600).default(60),
   failuresBeforeError: z.number().int().min(1).max(20).default(3),
   observeIssues: z.boolean().default(false), observePulls: z.boolean().default(false),
@@ -150,6 +150,8 @@ export async function pollMultiRound(ctx: SourceContext, config: MultiConfig, si
   const round = newRound(signal, MULTI)
   const state = ctx.state
   const repos = [...new Map(config.repositories.map(name => [normalize(name), name])).values()]
+  // With no repositories on the list there is nothing to route notifications or streams to; stay paused.
+  if (!repos.length) { ctx.report(MULTI, health('paused', 'sourceOff')); return 60 }
   const views = new Map<string, RepoView>()
   const viewOf = (repository: string): RepoView => {
     const key = normalize(repository)
