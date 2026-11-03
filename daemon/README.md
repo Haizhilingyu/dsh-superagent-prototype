@@ -94,3 +94,18 @@ The orchestrator selects the profile per ticket by trigger source (`executor.rem
 `{"github": "coder", "feishu": "assistant"}` with `defaultProfile` as the fallback). Each profile's system prompt is
 written to the workspace `AGENTS.md`, which both runtimes load automatically — long prompts never travel through the
 command line. Every turn's raw result is persisted to `<workdir>/.worker-last-turn.log` for diagnosis.
+
+## One daemon per orchestrator instance
+
+The daemon posts every callback (reports, turn ends, failures) to the single `CLOUD_URL` it was started with, and
+callbacks carry no instance identity — so one daemon process serves exactly one orchestrator instance. Running one
+orchestrator per repository (multi-repo instances) means one daemon per instance, each with its own port pair:
+
+| instance (orchestrator profile) | panel | `executor.remote` url → daemon | daemon `DAEMON_PORT` | daemon `CLOUD_URL` → listener |
+| --- | --- | --- | --- | --- |
+| `superagent` | 127.0.0.1:3082 | `http://10.147.17.177:8790` | 8790 | `http://10.147.17.56:8791` |
+| `word-agent` | 127.0.0.1:3102 | `http://10.147.17.177:8792` | 8792 | `http://10.147.17.56:8793` |
+
+Each orchestrator instance is a DSH profile with its own `cordis.patch.yml` (webserver port and `stateDir`), run by the
+`dsh-orchestrator@<profile>.service` template unit; the watchdog (`ops/watchdog.sh`) probes every instance, daemon and
+listener.

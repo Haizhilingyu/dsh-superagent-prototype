@@ -1,12 +1,17 @@
 #!/bin/sh
 # dsh-superagent watchdog: infra checks + delivery-loss + failed/stuck-ticket detection, Feishu alerts (hourly dedup)
+# Multi-instance (2026-11-03): one orchestrator instance per repository.
 STATE=/root/.dsh/watchdog.state
 SU=/root/dsh-superagent
-DDIR=/root/.dsh/state/superagent/orchestrator.sqlite
-DAEMON_URL=http://10.147.17.177:8790/v1/health
 DAEMON_TOKEN_FILE=/root/.secrets/agent_callback_token
 OPEN_ID=ou_453cd13aeb373d9da32fcb836b196f64
 DEDUP=3600
+# instance name : panel port : state db
+INSTANCES="superagent:3082:/root/.dsh/state/superagent/orchestrator.sqlite word-agent:3102:/root/.dsh/state/word-agent/orchestrator.sqlite"
+# worker daemons on the PC (ZeroTier)
+DAEMONS="8790 8792"
+# executor callback listeners (per instance)
+LISTENERS="8791 8793"
 
 alert() {
   key="$1"; msg="$2"
@@ -18,24 +23,36 @@ alert() {
 }
 resolve() { touch "$STATE"; sed -i "/^$1 /d" "$STATE" 2>/dev/null; }
 
-# 1. orchestrator service (API probe; systemd owns restarts — the watchdog only alerts)
-api=200
-if [ "" = "200" ]; then
-  resolve orch-down; resolve orch-still-down
-else
-  alert orch-down "云端 orchestrator API 无响应(code=none)——systemd 会自动重启，持续无响应请人工查看"
-fi
+# 1. orchestrator instances (API probe; systemd owns restarts — the watchdog only alerts)
+for entry in $INSTANCES; do
+  name=$(echo "$entry" | cut -d: -f1)
+  port=$(echo "$entry" | cut -d: -f2)
+  code=$(curl -s -m 8 -o /dev/null -w "%{http_code}" -H "x-orchestrator-request: 1" "http://127.0.0.1:$port/orchestrator/api/state" 2>/dev/null)
+  if [ "$code" = "200" ]; then
+    resolve "orch-down-$name"; resolve "orch-still-down-$name"
+  else
+    alert "orch-down-$name" "orchestrator 实例 $name(:$port) API 无响应(code=$code)——systemd 会自动重启，持续无响应请人工查看"
+  fi
+done
 
-# 2. worker daemon (ZeroTier)
-h=$(curl -s -m 8 -H "Authorization: Bearer $(cat "$DAEMON_TOKEN_FILE" 2>/dev/null)" "$DAEMON_URL" 2>/dev/null)
-case "$h" in *'"ok":true'*) resolve daemon-down ;; *) alert daemon-down "worker daemon(.177:8790) 无响应：${h:-no-reply}" ;; esac
+# 2. worker daemons (ZeroTier)
+for port in $DAEMONS; do
+  h=$(curl -s -m 8 -H "Authorization: Bearer $(cat "$DAEMON_TOKEN_FILE" 2>/dev/null)" "http://10.147.17.177:$port/v1/health" 2>/dev/null)
+  case "$h" in *'"ok":true'*) resolve "daemon-down-$port" ;; *) alert "daemon-down-$port" "worker daemon(.177:$port) 无响应：${h:-no-reply}" ;; esac
+done
 
-# 3. callback listener
-if ss -tln 2>/dev/null | grep -q ":8791"; then resolve cb-listener; else alert cb-listener "回调监听 10.147.17.56:8791 未监听（remote executor 不可达）"; fi
+# 3. executor callback listeners
+for port in $LISTENERS; do
+  if ss -tln 2>/dev/null | grep -q ":$port"; then resolve "cb-listener-$port"; else alert "cb-listener-$port" "回调监听 10.147.17.56:$port 未监听（remote executor 不可达）"; fi
+done
 
-# 4. outbox delivery: pending persisting across two runs = stuck; dropped = lost (投递错误可见化)
-outbox_result=$(python3 - "$DDIR" <<PYEOF
-import sqlite3, json, sys, os
+# 4+5. per-instance outbox delivery + ticket checks
+for entry in $INSTANCES; do
+  name=$(echo "$entry" | cut -d: -f1)
+  db=$(echo "$entry" | cut -d: -f3)
+  outbox_result=$(python3 - "$db" <<PYEOF
+import sqlite3, json, sys, os, time
+tag = sys.argv[1].split("/")[-2]
 try:
     db = sqlite3.connect(sys.argv[1])
     pending, dropped = [], []
@@ -45,7 +62,7 @@ try:
             dropped.append(d.get("channel", {}).get("source", "?") + ":" + (d.get("text") or "")[:40])
         if d.get("status") == "pending":
             pending.append(d.get("id", "")[:8])
-    state = "/root/.dsh/watchdog.pending"
+    state = "/root/.dsh/watchdog.pending." + tag
     seen = set()
     if os.path.exists(state):
         seen = {line.strip() for line in open(state) if line.strip()}
@@ -58,22 +75,6 @@ try:
         os.remove(state)
     if dropped:
         print("DROPPED " + " | ".join(dropped[:3]))
-except Exception as e:
-    print("OUTBOX-ERR " + str(e)[:100])
-PYEOF
-)
-if echo "$outbox_result" | grep -q PENDING-CARRIED; then
-  alert outbox-pending "有消息投递卡住超过一个周期：$(echo "$outbox_result" | grep PENDING-CARRIED | cut -c17-170)"
-fi
-if echo "$outbox_result" | grep -q DROPPED; then
-  alert outbox-dropped "有消息投递失败被丢弃（投递错误）：$(echo "$outbox_result" | grep DROPPED | cut -c9-170)"
-fi
-
-# 5. ticket checks: failed assignments (执行失败) + stuck running (卡住)
-ticket_result=$(python3 - "$DDIR" <<PYEOF
-import sqlite3, json, sys, time
-try:
-    db = sqlite3.connect(sys.argv[1])
     now = time.time()
     failed, stuck = [], []
     for (v,) in db.execute("SELECT value FROM ticket ORDER BY rowid DESC LIMIT 20"):
@@ -97,12 +98,19 @@ try:
     if stuck:
         print("STUCK " + " | ".join(stuck[:3]))
 except Exception as e:
-    print("TICKET-ERR " + str(e)[:80])
+    print("CHECK-ERR " + str(e)[:100])
 PYEOF
 )
-if echo "$ticket_result" | grep -q FAILED-TICKET; then
-  alert failed-ticket "有任务执行失败（已自动重试仍失败）：$(echo "$ticket_result" | grep FAILED-TICKET | cut -c15-170)"
-fi
-if echo "$ticket_result" | grep -q STUCK; then
-  alert stuck-ticket "有任务卡住超过 45 分钟无进展：$(echo "$ticket_result" | grep STUCK | cut -c7-170)"
-fi
+  if echo "$outbox_result" | grep -q PENDING-CARRIED; then
+    alert "outbox-pending-$name" "[$name] 有消息投递卡住超过一个周期：$(echo "$outbox_result" | grep PENDING-CARRIED | cut -c17-160)"
+  fi
+  if echo "$outbox_result" | grep -q DROPPED; then
+    alert "outbox-dropped-$name" "[$name] 有消息投递失败被丢弃（投递错误）：$(echo "$outbox_result" | grep DROPPED | cut -c9-160)"
+  fi
+  if echo "$outbox_result" | grep -q FAILED-TICKET; then
+    alert "failed-ticket-$name" "[$name] 有任务执行失败（已自动重试仍失败）：$(echo "$outbox_result" | grep FAILED-TICKET | cut -c15-160)"
+  fi
+  if echo "$outbox_result" | grep -q STUCK; then
+    alert "stuck-ticket-$name" "[$name] 有任务卡住超过 45 分钟无进展：$(echo "$outbox_result" | grep STUCK | cut -c7-160)"
+  fi
+done
