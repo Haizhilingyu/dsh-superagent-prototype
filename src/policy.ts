@@ -108,7 +108,11 @@ export const ExecutorConfigSchema = z.object({
     prepare: z.string().max(LIMITS.prepareCommand).default(''),
     /** Extra system-prompt text the daemon appends to the worker runtime's default prompt. */
     workerPrompt: z.string().max(LIMITS.prepareCommand).default(''),
-  }).strict().default({ url: '', listen: '', token: '', prepare: '', workerPrompt: '' }),
+    /** Maps a Source kind (`github`, `feishu`, ...) to the worker profile its tickets run with. */
+    profileBySource: z.record(z.string(), z.string()).default({}),
+    /** The worker profile used when the Source kind has no entry in `profileBySource`. */
+    defaultProfile: z.string().default('coder'),
+  }).strict().default({ url: '', listen: '', token: '', prepare: '', workerPrompt: '', profileBySource: {}, defaultProfile: 'coder' }),
 }).strict()
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
 export const SettingsSchema = z.object({

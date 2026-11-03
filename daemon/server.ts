@@ -1,17 +1,19 @@
 /**
  * The remote worker daemon: a small HTTP service on the worker host that receives Assignments from the orchestrator's
- * `RemoteExecutor`, prepares a git worktree per ticket, runs the pi coding agent, and reports back over HTTP. Built for a
- * flat network such as ZeroTier, where the orchestrator and the daemon reach each other directly.
+ * `RemoteExecutor`, prepares a git worktree per ticket, runs the ticket's worker profile (pi, omp, or a general
+ * assistant), and reports back over HTTP. Built for a flat network such as ZeroTier, where the orchestrator and the
+ * daemon reach each other directly.
  */
 import { execFile } from 'node:child_process'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
-import { dirname, delimiter, join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import { CALLBACK_PATH, DeliverRequestSchema, ENDPOINTS, LaunchRequestSchema, StopRequestSchema,
   type Callback, type DeliverInput, type LaunchRequest } from '../src/executor/protocol.ts'
-import { newSessionId, parseReport, runPiTurn, type PiTurnOptions } from './pi.ts'
+import { newSessionId, parseReport, runTurn, type TurnOptions } from './runtime.ts'
+import { loadProfiles, profileSystemPrompt, type WorkerProfile } from './profiles.ts'
 
 const config = {
   host: process.env.DAEMON_HOST ?? '0.0.0.0',
@@ -20,61 +22,42 @@ const config = {
   cloudUrl: process.env.CLOUD_URL ?? '',
   cloudToken: process.env.CLOUD_TOKEN ?? '',
   workRoot: process.env.WORK_ROOT ?? join(process.cwd(), 'work'),
-  piBin: process.env.PI_BIN ?? (process.platform === 'win32' ? 'pi.cmd' : 'pi'),
-  model: process.env.PI_MODEL || undefined,
-  thinking: process.env.PI_THINKING || undefined,
+  daemonDir: process.env.DAEMON_DIR ?? import.meta.dirname,
   maxConcurrent: Number(process.env.MAX_CONCURRENT ?? 3),
+  model: process.env.WORKER_MODEL || undefined,
+  thinking: process.env.WORKER_THINKING || undefined,
 }
 
-/** One ticket's worker: its workspace, its pi session, and the inputs queued for the next turn. */
+/** Per-runtime default binaries; profiles override via profiles.json `bin`. */
+const RUNTIME_DEFAULT_BIN: Record<string, string> = {
+  pi: process.platform === 'win32' ? 'pi.cmd' : 'pi',
+  omp: process.platform === 'win32' ? 'omp.exe' : 'omp',
+}
+
+/** One ticket's worker: its profile, workspace, session, and the inputs queued for the next turn. */
 interface Job {
   ticketId: string
   assignmentId: string
   workdir: string
   sessionId: string
   sessionDir: string
-  systemPrompt: string
+  profile: WorkerProfile
+  /** Whether at least one turn has run (omp continues the previous conversation only from the second turn on). */
+  turnedOnce: boolean
   /** Inputs accepted while a turn was running; each becomes the next turn's message. */
   pending: DeliverInput[]
-  /** Serializes turns: at most one pi process per job. */
+  /** Serializes turns: at most one worker process per job. */
   chain: Promise<void>
-  /** The running pi process, when a turn is active; stop kills it. */
+  /** The running worker process, when a turn is active; stop kills it. */
   child?: { pid?: number; kill: () => void }
 }
 
+const profiles = loadProfiles(config.daemonDir)
 const jobs = new Map<string, Job>()
 /** Turn slots currently in use, up to `config.maxConcurrent`. */
 let runningTurns = 0
 const waitingTurns: (() => void)[] = []
-/** Resolves a `.cmd` npm shim to the node script it runs, so turns spawn node directly without a shell. Returns `undefined` when `bin` is not a shim or the shim is unreadable. */
-function resolveEntry(bin: string): string | undefined {
-  if (!/\.cmd$/i.test(bin)) return undefined
-  const shim = locate(bin)
-  if (!shim) return undefined
-  try {
-    const match = /"%dp0%(\\[^"]+?\.js)"/.exec(readFileSync(shim, 'utf8'))
-    // The shim stores the script path relative to its own directory; npm on Windows writes it with a leading backslash.
-    return match?.[1] ? join(dirname(shim), match[1].replace(/^[\\/]+/, '')) : undefined
-  } catch {
-    return undefined
-  }
-}
-
-/** Locates `bin` on PATH (and the npm global directory as a fallback); returns absolute paths only. */
-function locate(bin: string): string | undefined {
-  if (bin.includes('\\') || bin.includes('/')) return existsSync(bin) ? bin : undefined
-  const dirs = [...(process.env.PATH?.split(delimiter) ?? []), join(process.env.APPDATA ?? '', 'npm')]
-  for (const dir of dirs) {
-    if (!dir) continue
-    const candidate = join(dir, bin)
-    if (existsSync(candidate)) return candidate
-  }
-  return undefined
-}
-
 let server: Server | undefined
-/** The node script behind a `.cmd` shim, resolved once at startup; turns spawn node directly with it. */
-let piEntry: string | undefined
 
 /** Logs one line to stderr; the daemon's only output channel. */
 function log(message: string): void {
@@ -104,19 +87,21 @@ async function postCallback(callback: Callback): Promise<void> {
 /** Runs one git command in `cwd` and resolves with its stdout; rejects with stderr on failure. */
 function git(cwd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile('git', args, { cwd, windowsHide: true, timeout: 120_000 }, (error, stdout, stderr) => {
+    execFile('git', args, { cwd, windowsHide: true, timeout: 300_000 }, (error, stdout, stderr) => {
       if (error) reject(new Error(`git ${args.join(' ')}: ${stderr || String(error)}`))
       else resolve(stdout)
     })
   })
 }
 
-/** Prepares the ticket workspace: a git worktree of the requested checkout, or a plain directory without one. */
-async function ensureWorkspace(request: LaunchRequest): Promise<string> {
+/** Prepares the ticket workspace: a clone/worktree of the requested repository, or a plain directory without one. */
+async function ensureWorkspace(request: LaunchRequest, profile: WorkerProfile): Promise<string> {
   const dir = join(config.workRoot, request.worktree)
   if (existsSync(dir)) return dir
   await mkdir(config.workRoot, { recursive: true })
-  if (request.repoPath) await git(request.repoPath, ['worktree', 'add', '-b', `ticket/${request.ticketId}`, dir])
+  const repoUrl = request.repository ? `https://github.com/${request.repository}.git` : ''
+  if (repoUrl) await git(config.workRoot, ['clone', '--branch', 'main', '--single-branch', repoUrl, dir])
+      .catch(() => git(config.workRoot, ['clone', repoUrl, dir]))
   else await mkdir(dir, { recursive: true })
   if (request.prepare.trim()) {
     await new Promise<void>((resolve, reject) => {
@@ -128,6 +113,7 @@ async function ensureWorkspace(request: LaunchRequest): Promise<string> {
       })
     })
   }
+  void profile
   return dir
 }
 
@@ -147,7 +133,7 @@ function releaseSlot(): void {
 }
 
 /**
- * Runs the queued turns of a job; each pi process is one turn with one report chance. A terminal report
+ * Runs the queued turns of a job; each worker process is one turn with one report chance. A terminal report
  * (`ready`/`dropped`/`failed`) ends the job; `progress`/`waiting`/`blocked` keeps it alive for further inputs.
  */
 async function pump(job: Job): Promise<void> {
@@ -155,21 +141,23 @@ async function pump(job: Job): Promise<void> {
     const input = job.pending.shift()
     if (!input || jobs.get(job.ticketId) !== job) return
     await reserveSlot()
-    const options: PiTurnOptions = {
-      bin: config.piBin,
-      entry: piEntry,
+    const turn: TurnOptions = {
+      runtime: job.profile.runtime,
+      bin: job.profile.bin ?? RUNTIME_DEFAULT_BIN[job.profile.runtime] ?? job.profile.runtime,
+      entry: job.profile.entry,
       sessionDir: job.sessionDir,
       sessionId: job.sessionId,
-      systemPrompt: job.systemPrompt,
-      model: config.model,
-      thinking: config.thinking,
+      systemPrompt: profileSystemPrompt(config.daemonDir, job.profile),
+      model: job.profile.model ?? config.model,
+      thinking: job.profile.thinking ?? config.thinking,
+      continueTurn: job.turnedOnce,
     }
-    let turn
+    let result
     try {
-      turn = await runPiTurn(options, job.workdir, input.message, child => { job.child = child })
+      result = await runTurn(turn, job.workdir, input.message, child => { job.child = child })
     } catch (error) {
       releaseSlot()
-      log(`pi spawn failed for ${job.ticketId}: ${String(error)}`)
+      log(`worker spawn failed for ${job.ticketId}: ${String(error)}`)
       if (jobs.get(job.ticketId) === job) {
         jobs.delete(job.ticketId)
         await postCallback({ type: 'failed', ticketId: job.ticketId, assignmentId: job.assignmentId, error: String(error).slice(0, 2000) })
@@ -177,11 +165,12 @@ async function pump(job: Job): Promise<void> {
       return
     }
     releaseSlot()
+    job.turnedOnce = true
     if (jobs.get(job.ticketId) !== job) return
     await postCallback({ type: 'turn-ended', ticketId: job.ticketId, assignmentId: job.assignmentId })
-    const report = parseReport(turn.text) ?? (turn.code === 0
-      ? { state: 'ready' as const, summary: turn.text.slice(0, 1500) || 'The worker finished its turn without a report.' }
-      : { state: 'failed' as const, summary: `pi exited with code ${turn.code}: ${turn.stderr.slice(-800)}` })
+    const report = parseReport(result.text) ?? (result.code === 0
+      ? { state: 'ready' as const, summary: result.text.slice(0, 1500) || 'The worker finished its turn without a report.' }
+      : { state: 'failed' as const, summary: `${job.profile.runtime} exited with code ${result.code}: ${result.stderr.slice(-800)}` })
     await postCallback({ type: 'report', ticketId: job.ticketId, assignmentId: job.assignmentId, ...report })
     if (report.state === 'ready' || report.state === 'dropped' || report.state === 'failed') {
       if (jobs.get(job.ticketId) === job) jobs.delete(job.ticketId)
@@ -198,23 +187,26 @@ async function launch(request: LaunchRequest): Promise<{ ok: true; detail: strin
       ? { ok: true, detail: existing.workdir }
       : { ok: false, error: `ticket ${request.ticketId} is already running assignment ${existing.assignmentId}`, permanent: true }
   }
+  const profile = profiles[request.profile]
+  if (!profile) return { ok: false, error: `unknown worker profile "${request.profile}" (known: ${Object.keys(profiles).join(', ')})`, permanent: true }
   let workdir: string
   try {
-    workdir = await ensureWorkspace(request)
+    workdir = await ensureWorkspace(request, profile)
   } catch (error) {
     return { ok: false, error: String(error).slice(0, 500), permanent: true }
   }
-  const sessionDir = join(workdir, '.pi-sessions')
+  const sessionDir = join(workdir, '.worker-sessions')
   await mkdir(sessionDir, { recursive: true })
   const job: Job = {
     ticketId: request.ticketId, assignmentId: request.assignmentId, workdir,
-    sessionId: newSessionId(), sessionDir, systemPrompt: request.systemPrompt, pending: [], chain: Promise.resolve(),
+    sessionId: newSessionId(), sessionDir, profile: { ...profile, model: profile.model ?? undefined }, pending: [], chain: Promise.resolve(),
+    turnedOnce: false,
   }
   jobs.set(request.ticketId, job)
   const first = [request.assignment, request.origin].filter(Boolean).join('\n\n---\n\n')
   if (first) job.pending.push({ id: 'origin', message: first })
   job.chain = job.chain.then(() => pump(job)).catch(error => log(`turn chain failed for ${job.ticketId}: ${String(error)}`))
-  return { ok: true, detail: workdir }
+  return { ok: true, detail: `${workdir} (profile ${request.profile})` }
 }
 
 /** Handles a delivery: queues the inputs into the job's next turn. */
@@ -227,7 +219,7 @@ async function deliver(request: z.infer<typeof DeliverRequestSchema>): Promise<{
   return { ok: true, detail: `${request.inputs.length} input(s) queued` }
 }
 
-/** Handles a stop: kills the pi process tree and forgets the job; the domain has already ended the ticket. */
+/** Handles a stop: kills the worker process tree and forgets the job; the domain has already ended the ticket. */
 async function stop(request: z.infer<typeof StopRequestSchema>): Promise<{ ok: true; detail: string }> {
   const job = jobs.get(request.ticketId)
   if (!job) return { ok: true, detail: 'already stopped' }
@@ -296,8 +288,7 @@ async function main(): Promise<void> {
     server!.once('error', reject)
     server!.listen(config.port, config.host, resolve)
   })
-  log(`daemon listening on ${config.host}:${config.port}, work root ${config.workRoot}, pi ${config.piBin}${resolveEntry(config.piBin) ? ` (entry ${resolveEntry(config.piBin)})` : ''}, max ${config.maxConcurrent}`)
-  piEntry = resolveEntry(config.piBin)
+  log(`daemon listening on ${config.host}:${config.port}, work root ${config.workRoot}, profiles ${Object.keys(profiles).join('/')}, max ${config.maxConcurrent}`)
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {
       log(`${signal}: stopping`)

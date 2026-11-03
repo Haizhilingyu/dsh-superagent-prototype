@@ -30,6 +30,10 @@ export const LaunchRequestSchema = z.object({
   systemPrompt: z.string().default(''),
   /** The origin trigger rendered for the worker, as `triggerMessage` builds it; delivered as the first message. */
   origin: z.string().default(''),
+  /** Worker profile name selected by the orchestrator (daemon-side `profiles.json` defines what each runs). */
+  profile: z.string().default('coder'),
+  /** `owner/name` of the repository the profile works on, when the profile needs one; empty for general work. */
+  repository: z.string().default(''),
   /** Optional worker runtime model override, as the runtime understands it. */
   model: z.string().optional(),
   /** Optional worker runtime thinking level override. */

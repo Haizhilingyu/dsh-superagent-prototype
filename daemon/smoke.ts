@@ -109,6 +109,8 @@ async function main(): Promise<void> {
     assignment: 'In README.md, replace the sentence "Say nothing yet." with "Smoke test passed." Then finish.',
     systemPrompt: 'You are a worker on a remote ticket. When done, your FINAL message must be exactly a JSON object: {"state":"ready","summary":"<one line>"}. Never write anything after that JSON.',
     origin: JSON.stringify({ trigger_id: 'tr1', from: 'alice', text: 'fix the readme' }),
+    profile: 'coder',
+    repository: '',
   }
   const response = await fetch(new URL(ENDPOINTS.launch, daemonUrl), {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer smoke-token' },

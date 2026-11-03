@@ -5,6 +5,7 @@
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { z } from 'zod'
 import { latestAssignment, liveTicket, runningAssignment } from '../core/index.ts'
 import type { AssessmentOutcome, Assignment, EngineForExecutor, Executor, Ticket, TicketInput, Trigger, WorkerReport } from '../core/index.ts'
 import type { Store } from '../app/store.ts'
@@ -20,6 +21,9 @@ type EngineCallbacks = Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDeli
 
 /** How long a single callback request body may be. */
 const MAX_BODY_BYTES = 1024 * 1024
+
+/** Reads the watched repository (`owner/name`) out of the GitHub Source's saved config. */
+const GithubRepoShape = z.looseObject({ repository: z.string().default('') })
 
 export interface RemoteHost {
   /** Where the Executor reports what happened to Assignments and Inputs; supplied as a getter to break the construction cycle. */
@@ -130,6 +134,12 @@ export class RemoteExecutor implements Executor {
       || latestAssignment(ticket)?.state !== 'pending') return
     const settings = this.host.store.settings()
     const trigger = this.host.store.triggers.get(ticket.origin.triggerId)
+    const sourceKind = trigger?.source ?? ''
+    const profileBySource = settings.executor.remote.profileBySource ?? {}
+    const profileName = profileBySource[sourceKind] || settings.executor.remote.defaultProfile || 'coder'
+    const repository = sourceKind === 'github'
+      ? GithubRepoShape.safeParse(settings.sources['github']?.config).data?.repository ?? ''
+      : ''
     const link = trigger ? await this.host.sourceLink(trigger) : {}
     const payload: LaunchRequest = {
       protocol: 1,
@@ -141,6 +151,8 @@ export class RemoteExecutor implements Executor {
       assignment: [ticket.execution?.assignment, ticket.mandate.scope].filter(Boolean).join('\n\nScope: '),
       systemPrompt: settings.executor.remote.workerPrompt,
       origin: trigger ? JSON.stringify(triggerMessage(trigger, link)) : '',
+      profile: profileName,
+      repository,
     }
     const reply = await this.post(ENDPOINTS.launch, payload)
     if (!reply.ok && reply.permanent) return this.launchFailed(ticketId, assignmentId, reply.error)
