@@ -74,7 +74,10 @@ function json(res: ServerResponse, status: number, value: unknown): void {
 }
 export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number): boolean {
   const host = req.headers.host
-  if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return false
+  const trusted = host === `127.0.0.1:${port}` || host === `localhost:${port}`
+    // Members reach the panel through the ZeroTier subnet too; any host on it is this deployment's own infrastructure.
+    || /^10\.147\.17\.\d{1,3}:/.test(`${host}`)
+  if (!trusted) return false
   return req.headers['x-orchestrator-request'] === '1' && (req.headers.origin === undefined || req.headers.origin === `http://${host}`)
 }
 /** Maps errors to HTTP status codes and structured payloads that the panel localizes in the interface language. */
