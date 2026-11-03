@@ -7,11 +7,11 @@ DAEMON_TOKEN_FILE=/root/.secrets/agent_callback_token
 OPEN_ID=ou_453cd13aeb373d9da32fcb836b196f64
 DEDUP=3600
 # instance name : panel port : state db
-INSTANCES="superagent:3082:/root/.dsh/state/superagent/orchestrator.sqlite word-agent:3102:/root/.dsh/state/word-agent/orchestrator.sqlite"
+INSTANCES="superagent:3082:/root/.dsh/state/superagent/orchestrator.sqlite"
 # worker daemons on the PC (ZeroTier)
-DAEMONS="8790 8792"
+DAEMONS="8790"
 # executor callback listeners (per instance)
-LISTENERS="8791 8793"
+LISTENERS="8791"
 
 alert() {
   key="$1"; msg="$2"
