@@ -98,6 +98,7 @@ function harness(configure?: (settings: Settings) => void): Harness {
     closing: () => false,
     paused: () => false,
     lifetime: new AbortController().signal,
+    launchRetryDelayMs: 10,
   }
   // Test seam: the store stub implements only the reads the executor makes; the cast states that contract.
   const executor = new RemoteExecutor(host as unknown as RemoteHost)
@@ -180,6 +181,19 @@ describe('RemoteExecutor.runLaunch', () => {
       expect(ticketId).toBe('t1')
       expect(report.state).toBe('failed')
       expect(report.summary).toContain('repository missing')
+    } finally { fake.server.close() }
+  })
+
+  it('retries transient launch failures with incrementing attempts before failing', async () => {
+    const app = harness()
+    const fake = await fakeDaemon(() => ({ ok: false, error: 'clone failed', permanent: false }))
+    app.settings.executor.remote.url = fake.url
+    try {
+      await app.executor.runLaunch({ ticketId: 't1', assignmentId: 'a1' })
+      const launchRequests = fake.requests.filter(r => r.path === ENDPOINTS.launch)
+      expect(launchRequests).toHaveLength(3)
+      expect(launchRequests.map(r => (r.body as { attempt?: number }).attempt)).toEqual([1, 2, 3])
+      expect(app.engine.calls.at(-1)!.method).toBe('report')
     } finally { fake.server.close() }
   })
 

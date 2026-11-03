@@ -34,6 +34,8 @@ export const LaunchRequestSchema = z.object({
   profile: z.string().default('coder'),
   /** `owner/name` of the repository the profile works on, when the profile needs one; empty for general work. */
   repository: z.string().default(''),
+  /** Launch attempt counter: attempts above 1 tell the daemon to discard any leftover workspace and start fresh. */
+  attempt: z.number().int().min(1).max(9).default(1),
   /** Optional worker runtime model override, as the runtime understands it. */
   model: z.string().optional(),
   /** Optional worker runtime thinking level override. */

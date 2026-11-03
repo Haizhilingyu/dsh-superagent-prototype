@@ -38,6 +38,8 @@ export interface RemoteHost {
   readonly closing: () => boolean
   readonly paused: () => boolean
   readonly lifetime: AbortSignal
+  /** Base delay between launch retries, in milliseconds; production leaves this unset (30s). Tests set a small value. */
+  readonly launchRetryDelayMs?: number
 }
 
 /** The executor's remote settings block. */
@@ -153,12 +155,30 @@ export class RemoteExecutor implements Executor {
       origin: trigger ? JSON.stringify(triggerMessage(trigger, link)) : '',
       profile: profileName,
       repository,
+      attempt: 1,
     }
-    const reply = await this.post(ENDPOINTS.launch, payload)
-    if (!reply.ok && reply.permanent) return this.launchFailed(ticketId, assignmentId, reply.error)
-    if (!reply.ok) throw new Error(`The worker daemon did not launch the assignment: ${reply.error}`)
-    this.launched.add(ticketId)
-    this.host.engine.assignmentStarted(ticketId, assignmentId)
+    const reply = await this.launchWithRetries(payload, ticketId, assignmentId)
+    if (reply.ok) {
+      this.launched.add(ticketId)
+      this.host.engine.assignmentStarted(ticketId, assignmentId)
+      return
+    }
+    this.launchFailed(ticketId, assignmentId, reply.error)
+  }
+
+  /** Launches with up to three attempts (the daemon discards the workspace on attempts after the first), backing off
+   * between tries, so a transient clone failure self-heals; only after the last attempt does the ticket fail. */
+  private async launchWithRetries(payload: LaunchRequest, ticketId: string, assignmentId: string): Promise<Reply> {
+    let last: Reply = { ok: false, error: 'no attempt', permanent: false }
+    const maxAttempts = 3
+    const baseDelay = this.host.launchRetryDelayMs ?? 30_000
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      payload.attempt = attempt
+      last = await this.post(ENDPOINTS.launch, payload, 1)
+      if (last.ok) return last
+      if (attempt < maxAttempts) await sleep(baseDelay * attempt, undefined, { signal: this.host.lifetime }).catch(() => { })
+    }
+    return last
   }
 
   /** Hands the ticket's waiting Inputs to the daemon in one batch; the daemon steers them into the worker's next turn. */

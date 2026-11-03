@@ -111,6 +111,7 @@ async function main(): Promise<void> {
     origin: JSON.stringify({ trigger_id: 'tr1', from: 'alice', text: 'fix the readme' }),
     profile: 'coder',
     repository: '',
+    attempt: 1,
   }
   const response = await fetch(new URL(ENDPOINTS.launch, daemonUrl), {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer smoke-token' },

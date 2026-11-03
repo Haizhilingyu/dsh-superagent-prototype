@@ -94,9 +94,11 @@ function git(cwd: string, args: string[]): Promise<string> {
   })
 }
 
-/** Prepares the ticket workspace: a clone/worktree of the requested repository, or a plain directory without one. */
-async function ensureWorkspace(request: LaunchRequest, profile: WorkerProfile): Promise<string> {
+/** Prepares the ticket workspace: a clone/worktree of the requested repository, or a plain directory without one.
+ * `forceFresh` (retry attempts after the first) discards any leftover workspace so the clone starts clean. */
+async function ensureWorkspace(request: LaunchRequest, profile: WorkerProfile, forceFresh: boolean): Promise<string> {
   const dir = join(config.workRoot, request.worktree)
+  if (forceFresh && existsSync(dir)) await rm(dir, { recursive: true, force: true })
   if (existsSync(dir)) {
     // An empty leftover directory (a failed earlier clone) is removed so this attempt can clone fresh;
     // a non-empty one is reused as-is (idempotent relaunch of the same assignment).
@@ -205,9 +207,10 @@ async function launch(request: LaunchRequest): Promise<{ ok: true; detail: strin
   if (!profile) return { ok: false, error: `unknown worker profile "${request.profile}" (known: ${Object.keys(profiles).join(', ')})`, permanent: true }
   let workdir: string
   try {
-    workdir = await ensureWorkspace(request, profile)
+    workdir = await ensureWorkspace(request, profile, request.attempt > 1)
   } catch (error) {
-    return { ok: false, error: String(error).slice(0, 500), permanent: true }
+    // Prepare failures are infrastructure problems (clone/网络) — retryable: the next attempt discards the workspace.
+    return { ok: false, error: String(error).slice(0, 500), permanent: false }
   }
   const sessionDir = join(workdir, '.worker-sessions')
   await mkdir(sessionDir, { recursive: true })
