@@ -52,6 +52,7 @@ for entry in $INSTANCES; do
   db=$(echo "$entry" | cut -d: -f3)
   outbox_result=$(python3 - "$db" <<PYEOF
 import sqlite3, json, sys, os, time
+from datetime import datetime, timezone
 tag = sys.argv[1].split("/")[-2]
 try:
     db = sqlite3.connect(sys.argv[1])
@@ -81,18 +82,28 @@ try:
         t = json.loads(v)
         if t.get("ended"):
             continue
-        for a in t.get("assignments", []):
-            rep = a.get("report") or {}
-            if a.get("state") == "running":
-                started = a.get("startedAt") or t.get("updatedAt") or ""
-                try:
-                    age_min = (now - time.mktime(time.strptime(started[:19], "%Y-%m-%dT%H:%M:%S"))) / 60
-                except Exception:
-                    continue
-                if age_min > 45:
-                    stuck.append((t.get("title") or "")[:30] + "({}min)".format(int(age_min)))
-            if rep.get("state") == "failed":
-                failed.append((t.get("title") or "")[:30] + " | " + (rep.get("summary") or "")[:100])
+        # Latest assignment only: a manual retry (tickets/:id/retry) replaces the
+        # assignment, which zeroes its failed report and stuck timer.
+        asns = t.get("assignments") or []
+        a = asns[-1] if asns else None
+        if not a:
+            continue
+        rep = a.get("report") or {}
+        if rep.get("state") == "failed":
+            failed.append((t.get("title") or "")[:30] + " | " + (rep.get("summary") or "")[:100])
+        if a.get("state") == "running":
+            # Timeout counts from this execution's start (UTC ISO with Z); the
+            # assignment's createdAt is the fallback, never the ticket's updatedAt.
+            started = a.get("startedAt") or a.get("createdAt") or ""
+            try:
+                dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                age_min = (now - dt.timestamp()) / 60
+            except Exception:
+                continue
+            if age_min > 45:
+                stuck.append((t.get("title") or "")[:30] + "({}min)".format(int(age_min)))
     if failed:
         print("FAILED-TICKET " + " || ".join(failed[:3]))
     if stuck:
@@ -108,9 +119,13 @@ PYEOF
     alert "outbox-dropped-$name" "[$name] 有消息投递失败被丢弃（投递错误）：$(echo "$outbox_result" | grep DROPPED | cut -c9-160)"
   fi
   if echo "$outbox_result" | grep -q FAILED-TICKET; then
-    alert "failed-ticket-$name" "[$name] 有任务执行失败（已自动重试仍失败）：$(echo "$outbox_result" | grep FAILED-TICKET | cut -c15-160)"
+    alert "failed-ticket-$name" "[$name] 有任务执行失败，等待人工处理或重试：$(echo "$outbox_result" | grep FAILED-TICKET | cut -c15-160)"
+  else
+    resolve "failed-ticket-$name"
   fi
   if echo "$outbox_result" | grep -q STUCK; then
-    alert "stuck-ticket-$name" "[$name] 有任务卡住超过 45 分钟无进展：$(echo "$outbox_result" | grep STUCK | cut -c7-160)"
+    alert "stuck-ticket-$name" "[$name] 有任务执行超过 45 分钟未结束（自执行开始计时）：$(echo "$outbox_result" | grep STUCK | cut -c7-160)"
+  else
+    resolve "stuck-ticket-$name"
   fi
 done
