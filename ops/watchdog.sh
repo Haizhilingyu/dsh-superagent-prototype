@@ -1,5 +1,5 @@
 #!/bin/sh
-# dsh-superagent watchdog: infra checks + delivery-loss + stuck-ticket detection, Feishu alerts (hourly dedup)
+# dsh-superagent watchdog: infra checks + delivery-loss + failed/stuck-ticket detection, Feishu alerts (hourly dedup)
 STATE=/root/.dsh/watchdog.state
 SU=/root/dsh-superagent
 DDIR=/root/.dsh/state/superagent/orchestrator.sqlite
@@ -18,22 +18,12 @@ alert() {
 }
 resolve() { touch "$STATE"; sed -i "/^$1 /d" "$STATE" 2>/dev/null; }
 
-# 1. orchestrator service (API probe is authoritative; the status script exit code has known false negatives)
-api=000
+# 1. orchestrator service (API probe; systemd owns restarts — the watchdog only alerts)
+api=200
 if [ "" = "200" ]; then
-  resolve orch-down; resolve orch-still-down; resolve orch-code2; resolve orch-code3
+  resolve orch-down; resolve orch-still-down
 else
-  alert orch-down "云端 orchestrator API 无响应(code=none)，正在自动重启"
-  cd /root/dsh-superagent && scripts/dsh-superagent stop >/dev/null 2>&1
-  sleep 5
-  scripts/dsh-superagent start >/dev/null 2>&1
-  sleep 8
-  api2=000
-  if [ "" = "200" ]; then
-    resolve orch-down; alert orch-recovered "orchestrator 已自动重启恢复"
-  else
-    alert orch-still-down "orchestrator 重启后仍无响应，请查 ~/dsh-superagent/.artifacts 最新日志"
-  fi
+  alert orch-down "云端 orchestrator API 无响应(code=none)——systemd 会自动重启，持续无响应请人工查看"
 fi
 
 # 2. worker daemon (ZeroTier)
@@ -79,18 +69,19 @@ if echo "$outbox_result" | grep -q DROPPED; then
   alert outbox-dropped "有消息投递失败被丢弃（投递错误）：$(echo "$outbox_result" | grep DROPPED | cut -c9-170)"
 fi
 
-# 5. stuck tickets (running > 45 min without finishing)
-python3 - "$DDIR" <<PYEOF
+# 5. ticket checks: failed assignments (执行失败) + stuck running (卡住)
+ticket_result=$(python3 - "$DDIR" <<PYEOF
 import sqlite3, json, sys, time
 try:
     db = sqlite3.connect(sys.argv[1])
     now = time.time()
-    stuck = []
+    failed, stuck = [], []
     for (v,) in db.execute("SELECT value FROM ticket ORDER BY rowid DESC LIMIT 20"):
         t = json.loads(v)
         if t.get("ended"):
             continue
         for a in t.get("assignments", []):
+            rep = a.get("report") or {}
             if a.get("state") == "running":
                 started = a.get("startedAt") or t.get("updatedAt") or ""
                 try:
@@ -99,8 +90,19 @@ try:
                     continue
                 if age_min > 45:
                     stuck.append((t.get("title") or "")[:30] + "({}min)".format(int(age_min)))
+            if rep.get("state") == "failed":
+                failed.append((t.get("title") or "")[:30] + " | " + (rep.get("summary") or "")[:100])
+    if failed:
+        print("FAILED-TICKET " + " || ".join(failed[:3]))
     if stuck:
         print("STUCK " + " | ".join(stuck[:3]))
 except Exception as e:
-    print("ERR " + str(e)[:80])
+    print("TICKET-ERR " + str(e)[:80])
 PYEOF
+)
+if echo "$ticket_result" | grep -q FAILED-TICKET; then
+  alert failed-ticket "有任务执行失败（已自动重试仍失败）：$(echo "$ticket_result" | grep FAILED-TICKET | cut -c15-170)"
+fi
+if echo "$ticket_result" | grep -q STUCK; then
+  alert stuck-ticket "有任务卡住超过 45 分钟无进展：$(echo "$ticket_result" | grep STUCK | cut -c7-170)"
+fi
