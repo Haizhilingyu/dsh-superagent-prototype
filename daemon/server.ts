@@ -7,7 +7,7 @@
 import { execFile } from 'node:child_process'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { existsSync } from 'node:fs'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import { CALLBACK_PATH, DeliverRequestSchema, ENDPOINTS, LaunchRequestSchema, StopRequestSchema,
@@ -97,7 +97,13 @@ function git(cwd: string, args: string[]): Promise<string> {
 /** Prepares the ticket workspace: a clone/worktree of the requested repository, or a plain directory without one. */
 async function ensureWorkspace(request: LaunchRequest, profile: WorkerProfile): Promise<string> {
   const dir = join(config.workRoot, request.worktree)
-  if (existsSync(dir)) return dir
+  if (existsSync(dir)) {
+    // An empty leftover directory (a failed earlier clone) is removed so this attempt can clone fresh;
+    // a non-empty one is reused as-is (idempotent relaunch of the same assignment).
+    const entries = await readdir(dir).catch(() => null)
+    if (entries && entries.length > 0) return dir
+    await rm(dir, { recursive: true, force: true })
+  }
   await mkdir(config.workRoot, { recursive: true })
   const repoUrl = request.repository ? `https://github.com/${request.repository}.git` : ''
   if (repoUrl) await git(config.workRoot, ['clone', '--branch', 'main', '--single-branch', repoUrl, dir])
