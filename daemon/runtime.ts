@@ -30,8 +30,8 @@ export interface TurnOptions {
    * omp isolates per-ticket conversations by `sessionDir` alone and uses `-c` for follow-up turns.
    */
   sessionId?: string
-  /** Extra system-prompt text appended to the runtime's default prompt; empty appends nothing. */
-  systemPrompt: string
+  /** Extra system-prompt text appended inline to the argv (keep it SHORT; long prompts go through AGENTS.md instead). */
+  appendSystemPrompt?: string
   /** Optional model pattern and thinking level passed through to the runtime. */
   model?: string
   thinking?: string
@@ -111,11 +111,12 @@ export function parseReport(text: string): WorkerReportText | undefined {
   return undefined
 }
 
-/** Builds one runtime's argument vector for a turn: the message travels as a `@file` argument. */
+/** Builds one runtime's argument vector for a turn: the message travels as a `@file` argument. System prompts are NOT
+ * passed here — multiline prompts through the Windows command line truncate unpredictably; the daemon writes them to the
+ * workspace `AGENTS.md`, which both runtimes load automatically. */
 export function turnArgs(options: TurnOptions, messagePath: string): string[] {
   if (options.runtime === 'omp') {
     const args = ['--mode', 'json', '--no-lsp', '--no-pty']
-    if (options.systemPrompt.trim()) args.push('--append-system-prompt', options.systemPrompt.trim())
     if (options.model) args.push('--model', options.model)
     if (options.thinking) args.push('--thinking', options.thinking)
     args.push('--session-dir', options.sessionDir)
@@ -124,7 +125,6 @@ export function turnArgs(options: TurnOptions, messagePath: string): string[] {
     return args
   }
   const args = ['--mode', 'json']
-  if (options.systemPrompt.trim()) args.push('--append-system-prompt', options.systemPrompt.trim())
   if (options.model) args.push('--model', options.model)
   if (options.thinking) args.push('--thinking', options.thinking)
   args.push('--session-dir', options.sessionDir, '--session-id', options.sessionId ?? newSessionId(), '-p', '--', `@${messagePath}`)

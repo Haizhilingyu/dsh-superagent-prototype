@@ -7,7 +7,7 @@
 import { execFile } from 'node:child_process'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { existsSync } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import { CALLBACK_PATH, DeliverRequestSchema, ENDPOINTS, LaunchRequestSchema, StopRequestSchema,
@@ -103,6 +103,8 @@ async function ensureWorkspace(request: LaunchRequest, profile: WorkerProfile): 
   if (repoUrl) await git(config.workRoot, ['clone', '--branch', 'main', '--single-branch', repoUrl, dir])
       .catch(() => git(config.workRoot, ['clone', repoUrl, dir]))
   else await mkdir(dir, { recursive: true })
+  const prompt = profileSystemPrompt(config.daemonDir, profile)
+  if (prompt.trim()) await writeFile(join(dir, 'AGENTS.md'), prompt, 'utf8')
   if (request.prepare.trim()) {
     await new Promise<void>((resolve, reject) => {
       // The prepare command reads the same DSH_SUPERAGENT_* variables the local executor's prepare reads.
@@ -141,20 +143,21 @@ async function pump(job: Job): Promise<void> {
     const input = job.pending.shift()
     if (!input || jobs.get(job.ticketId) !== job) return
     await reserveSlot()
+    const reminder = '\n\n[汇报格式] 任务完成后，你的最后一条消息必须以一个 JSON 对象结尾：{"state":"ready|blocked|failed|dropped","summary":"<一行总结>"}'
+    const message = input.message + reminder
     const turn: TurnOptions = {
       runtime: job.profile.runtime,
       bin: job.profile.bin ?? RUNTIME_DEFAULT_BIN[job.profile.runtime] ?? job.profile.runtime,
       entry: job.profile.entry,
       sessionDir: job.sessionDir,
       sessionId: job.sessionId,
-      systemPrompt: profileSystemPrompt(config.daemonDir, job.profile),
       model: job.profile.model ?? config.model,
       thinking: job.profile.thinking ?? config.thinking,
       continueTurn: job.turnedOnce,
     }
     let result
     try {
-      result = await runTurn(turn, job.workdir, input.message, child => { job.child = child })
+      result = await runTurn(turn, job.workdir, message, child => { job.child = child })
     } catch (error) {
       releaseSlot()
       log(`worker spawn failed for ${job.ticketId}: ${String(error)}`)
@@ -166,6 +169,11 @@ async function pump(job: Job): Promise<void> {
     }
     releaseSlot()
     job.turnedOnce = true
+    log(`turn done: ${job.ticketId} profile=${job.profile.runtime} exit=${result.code} textLen=${result.text.length} summary=${JSON.stringify((parseReport(result.text) ?? { summary: result.text.slice(0, 80) }).summary ?? result.text.slice(0, 80))}`)
+    void writeFile(join(job.workdir, '.worker-last-turn.log'), JSON.stringify({
+      runtime: job.profile.runtime, code: result.code, textLen: result.text.length,
+      stderrHead: result.stderr.slice(0, 2000), text: result.text.slice(0, 4000), output: result.output.slice(-8000),
+    })).catch(() => { })
     if (jobs.get(job.ticketId) !== job) return
     await postCallback({ type: 'turn-ended', ticketId: job.ticketId, assignmentId: job.assignmentId })
     const report = parseReport(result.text) ?? (result.code === 0
