@@ -79,3 +79,18 @@ node daemon/smoke.ts
 
 Builds a scratch git repository, starts a stub orchestrator plus the daemon, launches a real pi turn that edits
 `README.md`, and exits `SMOKE PASS` when the report callback lands with `state: ready`. Requires `pi` and `git` on PATH.
+
+## Worker profiles
+
+The daemon loads worker profiles from `daemon/profiles.json` (optional) over the built-ins in `daemon/profiles.ts`:
+
+| profile | runtime | repository | 用途 |
+| --- | --- | --- | --- |
+| `coder` | pi | 需要（按 launch 的 repository 克隆） | 仓库编码任务 |
+| `assistant` | pi | 不需要 | 通用生活/查询助手，提示词在 `profiles/assistant.md`，会写入工作区 AGENTS.md |
+| `omp-coder` | omp | 需要 | omp 运行时的编码任务 |
+
+The orchestrator selects the profile per ticket by trigger source (`executor.remote.profileBySource`, e.g.
+`{"github": "coder", "feishu": "assistant"}` with `defaultProfile` as the fallback). Each profile's system prompt is
+written to the workspace `AGENTS.md`, which both runtimes load automatically — long prompts never travel through the
+command line. Every turn's raw result is persisted to `<workdir>/.worker-last-turn.log` for diagnosis.
