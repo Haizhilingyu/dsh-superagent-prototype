@@ -20,7 +20,10 @@ const NotificationSchema = z.looseObject({
 const RETRY_WINDOW_MS = 24 * 3600_000
 
 const MultiConfigSchema = GithubAccountsSchema.extend({
-  repositories: z.array(z.string().trim().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, 'owner/name')).max(20).default([]),
+  repositories: z.preprocess(
+    (value) => Array.isArray(value) ? value.map(item => typeof item === "string" ? { repository: item.trim() } : item) : value,
+    z.array(z.object({ repository: z.string().trim().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, "owner/name") }).strict()).max(20).default([]),
+  ),
   pollSeconds: z.number().int().min(60).max(3600).default(60),
   failuresBeforeError: z.number().int().min(1).max(20).default(3),
   observeIssues: z.boolean().default(false), observePulls: z.boolean().default(false),
@@ -38,11 +41,12 @@ function scopeOf(meta: Record<string, unknown>): Scope | undefined {
 /** Normalizes an `owner/name` repository name for case-insensitive deduplication and lookup. */
 const normalize = (repository: string): string => repository.toLowerCase()
 /** A per-repository view whose commands, Thread keys, triggers, and state keys all qualify `repository`. */
-const multiRepoView = (ctx: SourceContext, repository: string, signal?: AbortSignal): RepoView => {
+const multiRepoView = (ctx: SourceContext, repository: string, signal?: AbortSignal, cli?: string): RepoView => {
   const scope: GithubScope = { source: MULTI, repository }
   return {
     source: MULTI, repository, scope,
-    commands: new Commands(() => ({ ...ctx.deployment, repository }), {}, signal ?? new AbortController().signal),
+    commands: new Commands(() => ({ ...ctx.deployment, repository,
+      github: cli ? { ...ctx.deployment.github, cli } : ctx.deployment.github }), {}, signal ?? new AbortController().signal),
     thread: number => `${MULTI}:${repository}#${number}`,
     ref: number => `${repository}#${number}`,
     cursorKey: number => KV.githubMulti.cursor(`${repository}#${number}`),
@@ -74,6 +78,8 @@ export const githubMultiKind: SourceKind<MultiConfig> = {
     { key: 'repositories', type: 'rows', label: { zh: '监听的仓库', en: 'Repositories' },
       hint: { zh: '每行一个 owner/name。这个来源用一次通知轮询接收名单内全部仓库的讨论；名单变更即刻生效，无需重启。', en: 'One owner/name per row. This Source receives discussion for every repository on the list through one notifications poll; list changes apply at once, without a restart.' },
       columns: [{ key: 'repository', type: 'text', label: { zh: '仓库', en: 'Repository' }, pattern: '[A-Za-z0-9_.\\-]+/[A-Za-z0-9_.\\-]+' }] },
+    { key: 'cli', type: 'text', label: { zh: '智能体的 GitHub CLI', en: 'Agent GitHub CLI' },
+      hint: { zh: '命令名或绝对路径，通常是用 GH_CONFIG_DIR 登录智能体账号的 gh。名单内所有仓库共用它；留空时用部署时配置的账号 CLI。', en: 'A command name or absolute path, usually gh signed in to the agent account through GH_CONFIG_DIR. All repositories on the list share it; when empty, the deployment account CLI is used.' } },
     { key: 'pollSeconds', type: 'number', advanced: true, min: 60, max: 3600, label: { zh: '轮询间隔 / 秒', en: 'Polling interval / seconds' }, hint: { zh: 'GitHub 要求更长间隔时以 GitHub 为准。', en: 'A longer interval requested by GitHub wins.' } },
     { key: 'failuresBeforeError', type: 'number', advanced: true, min: 1, max: 20, label: { zh: '连续失败几次后报告异常', en: 'Failed polls before reporting an error' }, hint: { zh: '单次网络中断会在下一次轮询时自动重试，不必报告。', en: 'A single network interruption is retried on the next poll and need not be reported.' } },
     { key: 'observeIssues', type: 'switch', label: { zh: '接收仓库里的新 Issue', en: 'Receive new Issues in the repositories' },
@@ -149,7 +155,7 @@ export const githubMultiKind: SourceKind<MultiConfig> = {
 export async function pollMultiRound(ctx: SourceContext, config: MultiConfig, signal?: AbortSignal): Promise<number> {
   const round = newRound(signal, MULTI)
   const state = ctx.state
-  const repos = [...new Map(config.repositories.map(name => [normalize(name), name])).values()]
+  const repos = [...new Map(config.repositories.map(row => [normalize(row.repository), row.repository])).values()]
   // With no repositories on the list there is nothing to route notifications or streams to; stay paused.
   if (!repos.length) { ctx.report(MULTI, health('paused', 'sourceOff')); return 60 }
   const views = new Map<string, RepoView>()
@@ -157,7 +163,7 @@ export async function pollMultiRound(ctx: SourceContext, config: MultiConfig, si
     const key = normalize(repository)
     const cached = views.get(key)
     if (cached) return cached
-    const view = multiRepoView(ctx, repository, round.signal)
+    const view = multiRepoView(ctx, repository, round.signal, config.cli || undefined)
     views.set(key, view)
     return view
   }
