@@ -231,7 +231,12 @@ function match(table: Routes, method: string, segments: string[]) {
   return undefined
 }
 export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
-  if (ctx.webServer.host !== '127.0.0.1') throw new Error('Orchestrator management requires a loopback Web server')
+  // Loopback or RFC1918/private binds are accepted (container/ZT deployments); the
+  // token + same-origin fence still guard every management route.
+  const host = ctx.webServer.host
+  const privateBind = host === '127.0.0.1' || host === 'localhost' || host === '::1'
+    || /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(host)
+  if (!privateBind) throw new Error('Orchestrator management requires a loopback or private-network Web server')
   const table = routes(runtime)
   const disposers = [
     ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {
